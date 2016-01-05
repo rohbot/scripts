@@ -9,6 +9,8 @@ from oauth2client import tools
 from apiclient import errors
 from apiclient import http
 import json
+import random
+import pyrfc3339
 
 try:
     import argparse
@@ -19,6 +21,10 @@ except ImportError:
 SCOPES = 'https://www.googleapis.com/auth/drive'
 CLIENT_SECRET_FILE = 'client_secret.json'
 APPLICATION_NAME = 'Drive API Python Quickstart'
+PHOTO_TO_DL_HASH = 'photos-to-dl'
+DL_PHOTOS_HASH = 'dl-photos'
+PHOTO_HASH = 'photos'
+PHOTO_DIR = '/home/roh/Pictures/Google/'
 r = redis.Redis()
 
 
@@ -51,12 +57,12 @@ def get_credentials():
     return credentials
 
 
-def get_files(service):
+def load_files(service):
   
   req = service.files().list(maxResults=500)
   results = req.execute()
   running = True
-  photos = []
+  num_photos = 0
   while running:
     items = results.get('items', [])
     if not items:
@@ -64,36 +70,50 @@ def get_files(service):
     else:
       print('Files:')
       for item in items:
+        key = item['id']
         #print('{0} ({1})'.format(item['title'], item['id']))
-        if item['mimeType'] == 'image/jpeg':
-          photos.append(item)         
-          fname = item['title']
+        if item['mimeType'] == 'image/jpeg' and not r.hexists(PHOTO_HASH,key):
+          
+          photo_data = json.dumps(item)   
+          fname = item['originalFilename']
+          if fname[-3:].upper() != 'JPG':
+            fname = key + ".jpg"
+          cdate = pyrfc3339.parse(item['createdDate']).strftime('%s')
+          #print item 
+          fname = cdate + '_' + fname
+
+          r.hset(PHOTO_TO_DL_HASH,key,fname)
+          r.hset(PHOTO_HASH,key,photo_data)
           print fname
-        #fd = open(fname,'w')
-          #download_file(service, item['id'],fd)
-          #print items[1]
+          num_photos += 1
+        
     req = service.files().list_next(req,results)
     if req: 
       results= req.execute()
     else:
       running = False
-  print len(photos)
-  rs = json.dumps(photos)   
-  r.set('photo:json',rs)
+    #if num_photos > 3:
+    #  running = False  
+  print 'Phots Found: ' , num_photos
+  #rs = json.dumps(photos)   
+  #r.set('photo:json',rs)
 
 
-def download_file(service, file_id, local_fd):
-  """Download a Drive file's content to the local filesystem.
+def download_files(service):
 
-  Args:
-    service: Drive API Service instance.
-    file_id: ID of the Drive file that will downloaded.
-    local_fd: io.Base or file object, the stream that the Drive file's
-        contents will be written to.
-  """
-  request = service.files().get_media(fileId=file_id)
+  keys = r.hkeys(PHOTO_TO_DL_HASH)
+  while len(keys) > 0:
+    key = random.choice(keys)
+    fname = r.hget(PHOTO_TO_DL_HASH,key)
+    download_file(service,key,fname)
+    keys = r.hkeys(PHOTO_TO_DL_HASH)
+  
+
+def download_file(service,key,fname):
+  local_fd =  open(PHOTO_DIR+fname, 'w+')
+  request = service.files().get_media(fileId=key)
   media_request = http.MediaIoBaseDownload(local_fd, request)
-
+  print 'Downloading: ' + fname
   while True:
     try:
       download_progress, done = media_request.next_chunk()
@@ -104,47 +124,14 @@ def download_file(service, file_id, local_fd):
       print 'Download Progress: %d%%' % int(download_progress.progress() * 100)
     if done:
       print 'Download Complete'
+      r.hset(DL_PHOTOS_HASH,key,fname)
+      r.hdel(PHOTO_TO_DL_HASH,key)
       return
 
-def download_files(service):
 
-  rs = r.get('photo:json')
-  results = json.loads(rs)
-  
+def get_photo(key):
+  return fname
 
-def generare_index():
-  rs = r.get('photo:json')
-  results = json.loads(rs)
-  print len(results)
-
-  html = """
-  <html>
-  <header>
-  <title> My Photos </title>
-  </header>
-  """
-  img = """<a href= '%s'><img src = '%s'></img></a>
-  """
-
-  count = 1
-  for item in results:
-  #item = results[0]
-    if item['mimeType'] == 'image/jpeg':
-      title = item['title']
-      id = item['id']
-      dl = item['webContentLink']
-      thumb = item['thumbnailLink']   
-      #print item['title'] , item['id'], link
-      #redis.hset('photos', item['id'], json.dumps(item))
-      html += img % (dl,thumb)
-      if count % 6 == 0:
-        html += "<br/>"
-  #b = json.loads(redis.get('photo:id:' + item['id']))
-  #print b['title']
-
-  f = open('index.html', 'w')
-  f.write(html)
-  f.close()
 
 def main():
   """Shows basic usage of the Google Drive API.
@@ -156,6 +143,7 @@ def main():
   http = credentials.authorize(httplib2.Http())
   service = discovery.build('drive', 'v2', http=http)
   
+  load_files(service)
   download_files(service)
   
 
